@@ -234,8 +234,9 @@
 
     function getPos(e) {
       const rect = cropOverlay.getBoundingClientRect();
-      const clientX = e.touches ? e.touches[0].clientX : e.clientX;
-      const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+      const touch = e.touches ? e.touches.item(0) : null;
+      const clientX = touch ? touch.clientX : e.clientX;
+      const clientY = touch ? touch.clientY : e.clientY;
       return { x: clientX - rect.left, y: clientY - rect.top };
     }
 
@@ -332,7 +333,7 @@
     }
 
     imgUpload.addEventListener('change', (e) => {
-      const file = e.target.files[0];
+      const file = e.target.files.item(0);
       if (!file) return;
       const reader = new FileReader();
       reader.onload = (ev) => {
