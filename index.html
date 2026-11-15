@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Image Resizer | ElijahAmogsus</title>
+  <title>Image Resizer & Cropper | ElijahAmogsus</title>
   <style>
     :root {
       --base: #1e1e2e; --mantle: #181825; --surface0: #313244;
@@ -27,7 +27,7 @@
     p { color: var(--subtext0); margin: 0 0 24px 0; text-align: center; }
     .box {
       background: var(--mantle); border: 2px solid var(--surface1); border-radius: 12px;
-      padding: 22px; width: 100%; max-width: 460px; display: flex; flex-direction: column; align-items: center; gap: 14px;
+      padding: 22px; width: 100%; max-width: 480px; display: flex; flex-direction: column; align-items: center; gap: 14px;
     }
     input[type="file"] { width: 100%; color: var(--text); font-family: monospace; }
     .controls { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; align-items: center; width: 100%; }
@@ -36,14 +36,20 @@
       background: var(--surface0); color: var(--text); font-family: monospace; font-weight: bold; text-align: center;
     }
     .check-row { display: flex; gap: 16px; flex-wrap: wrap; justify-content: center; font-size: 0.92rem; }
+    .canvas-wrap {
+      position: relative; display: none; max-width: 100%; touch-action: none; user-select: none;
+    }
     #previewCanvas {
-      max-width: 100%; max-height: 260px; border: 2px solid var(--accent);
-      border-radius: 8px; display: none;
+      display: block; max-width: 100%; max-height: 300px; border: 2px solid var(--accent); border-radius: 6px;
+    }
+    #cropOverlay {
+      position: absolute; top: 0; left: 0; width: 100%; height: 100%; display: none; cursor: crosshair;
     }
     .btn {
       background: var(--accent); color: var(--crust); border: none; border-radius: 6px;
-      padding: 9px 16px; font-family: monospace; font-weight: bold; cursor: pointer;
+      padding: 8px 14px; font-family: monospace; font-weight: bold; cursor: pointer;
     }
+    .btn.secondary { background: var(--surface0); color: var(--text); border: 2px solid var(--surface1); }
     .btn:disabled { background: var(--surface1); color: var(--subtext0); cursor: not-allowed; }
     a.back { margin-top: 25px; color: var(--accent); text-decoration: none; font-weight: bold; }
   </style>
@@ -72,12 +78,23 @@
     </select>
   </div>
 
-  <h1>📐 Image Resizer</h1>
-  <p>Resize photos or upscale crisp pixel art to any resolution</p>
+  <h1>📐 Image Resizer & Cropper</h1>
+  <p>Crop with corner handles, resize photos, or upscale crisp pixel art</p>
 
   <div class="box">
     <input type="file" id="imgUpload" accept="image/*">
     <div id="origInfo" style="color: var(--subtext0); font-size: 0.88rem;">No image loaded</div>
+
+    <div class="controls">
+      <button class="btn secondary" id="cropToggleBtn" onclick="toggleCrop()" disabled>✂️ Crop Mode</button>
+      <button class="btn" id="applyCropBtn" onclick="applyCrop()" style="display:none;">✅ Apply Crop</button>
+      <button class="btn secondary" id="resetBtn" onclick="resetImage()" style="display:none;">↩️ Reset</button>
+    </div>
+
+    <div class="canvas-wrap" id="canvasWrap">
+      <canvas id="previewCanvas"></canvas>
+      <canvas id="cropOverlay"></canvas>
+    </div>
 
     <div class="controls">
       <label>W: <input type="number" id="wInput" value="1080" min="1" max="4096"></label>
@@ -89,7 +106,6 @@
       <label><input type="checkbox" id="pixelCrisp"> Pixel Art (Crisp)</label>
     </div>
 
-    <canvas id="previewCanvas"></canvas>
     <button class="btn" id="dlBtn" onclick="downloadResized()" disabled>⬇️ Download PNG</button>
   </div>
 
@@ -125,28 +141,194 @@
       root.setProperty('--accent', p.accents[currentAccent] || p.accents.blue);
       document.querySelectorAll('.theme-btn').forEach(b => b.classList.toggle('active', b.getAttribute('onclick').includes(`'${currentTheme}'`)));
       document.getElementById('accentSelect').value = currentAccent;
+      if (cropping) drawCropOverlay();
     }
     function setTheme(name) { currentTheme = name; localStorage.setItem('catppuccin-theme', name); applyPalette(); }
     function setAccent(accent) { currentAccent = accent; localStorage.setItem('catppuccin-accent', accent); applyPalette(); }
     applyPalette();
-
     const imgUpload = document.getElementById('imgUpload'), origInfo = document.getElementById('origInfo');
     const wInput = document.getElementById('wInput'), hInput = document.getElementById('hInput');
     const lockRatio = document.getElementById('lockRatio'), pixelCrisp = document.getElementById('pixelCrisp');
+    const canvasWrap = document.getElementById('canvasWrap');
     const previewCanvas = document.getElementById('previewCanvas'), pCtx = previewCanvas.getContext('2d');
-    const dlBtn = document.getElementById('dlBtn');
+    const cropOverlay = document.getElementById('cropOverlay'), cCtx = cropOverlay.getContext('2d');
+    const cropToggleBtn = document.getElementById('cropToggleBtn'), applyCropBtn = document.getElementById('applyCropBtn');
+    const resetBtn = document.getElementById('resetBtn'), dlBtn = document.getElementById('dlBtn');
 
-    let loadedImg = null, aspect = 1;
+    let originalImg = null, workingImg = null, aspect = 1, cropping = false;
+    let cropBox = { x: 20, y: 20, w: 120, h: 120 }, dragMode = null, dragStart = { x: 0, y: 0 };
 
     function renderPreview() {
-      if (!loadedImg) return;
-      const w = Math.max(1, Math.min(4096, parseInt(wInput.value) || loadedImg.width));
-      const h = Math.max(1, Math.min(4096, parseInt(hInput.value) || loadedImg.height));
+      if (!workingImg) return;
+      const w = Math.max(1, Math.min(4096, parseInt(wInput.value) || workingImg.width));
+      const h = Math.max(1, Math.min(4096, parseInt(hInput.value) || workingImg.height));
       previewCanvas.width = w; previewCanvas.height = h;
       previewCanvas.style.imageRendering = pixelCrisp.checked ? 'pixelated' : 'auto';
       pCtx.imageSmoothingEnabled = !pixelCrisp.checked;
       pCtx.clearRect(0, 0, w, h);
-      pCtx.drawImage(loadedImg, 0, 0, w, h);
+      pCtx.drawImage(workingImg, 0, 0, w, h);
+      if (cropping) syncOverlaySize();
+    }
+
+    function syncOverlaySize() {
+      const rect = previewCanvas.getBoundingClientRect();
+      cropOverlay.width = rect.width;
+      cropOverlay.height = rect.height;
+      drawCropOverlay();
+    }
+
+    function drawCropOverlay() {
+      const w = cropOverlay.width, h = cropOverlay.height;
+      const accentColor = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#89b4fa';
+      cCtx.clearRect(0, 0, w, h);
+
+      cCtx.fillStyle = 'rgba(0, 0, 0, 0.52)';
+      cCtx.fillRect(0, 0, w, h);
+      cCtx.clearRect(cropBox.x, cropBox.y, cropBox.w, cropBox.h);
+
+      cCtx.save();
+      cCtx.strokeStyle = accentColor;
+      cCtx.lineWidth = 2.5;
+      cCtx.setLineDash([8, 6]);
+      cCtx.strokeRect(cropBox.x, cropBox.y, cropBox.w, cropBox.h);
+      cCtx.restore();
+
+      const len = 18;
+      const corners = [
+        [cropBox.x, cropBox.y, 1, 1],
+        [cropBox.x + cropBox.w, cropBox.y, -1, 1],
+        [cropBox.x, cropBox.y + cropBox.h, 1, -1],
+        [cropBox.x + cropBox.w, cropBox.y + cropBox.h, -1, -1]
+      ];
+      corners.forEach(([cx, cy, dx, dy]) => {
+        cCtx.beginPath();
+        cCtx.moveTo(cx + dx * len, cy);
+        cCtx.lineTo(cx, cy);
+        cCtx.lineTo(cx, cy + dy * len);
+        cCtx.lineWidth = 7;
+        cCtx.lineCap = 'round';
+        cCtx.lineJoin = 'round';
+        cCtx.strokeStyle = accentColor;
+        cCtx.stroke();
+
+        cCtx.lineWidth = 3;
+        cCtx.strokeStyle = '#ffffff';
+        cCtx.stroke();
+      });
+    }
+
+    function toggleCrop() {
+      if (!workingImg) return;
+      cropping = !cropping;
+      cropOverlay.style.display = cropping ? 'block' : 'none';
+      applyCropBtn.style.display = cropping ? 'inline-block' : 'none';
+      cropToggleBtn.textContent = cropping ? '❌ Cancel Crop' : '✂️ Crop Mode';
+      if (cropping) {
+        const rect = previewCanvas.getBoundingClientRect();
+        cropOverlay.width = rect.width;
+        cropOverlay.height = rect.height;
+        cropBox = { x: rect.width * 0.15, y: rect.height * 0.15, w: rect.width * 0.7, h: rect.height * 0.7 };
+        drawCropOverlay();
+      }
+    }
+
+    function getPos(e) {
+      const rect = cropOverlay.getBoundingClientRect();
+      const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+      const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+      return { x: clientX - rect.left, y: clientY - rect.top };
+    }
+
+    function hitTest(pos) {
+      const r = 24;
+      const { x, y, w, h } = cropBox;
+      if (Math.hypot(pos.x - x, pos.y - y) < r) return 'tl';
+      if (Math.hypot(pos.x - (x + w), pos.y - y) < r) return 'tr';
+      if (Math.hypot(pos.x - x, pos.y - (y + h)) < r) return 'bl';
+      if (Math.hypot(pos.x - (x + w), pos.y - (y + h)) < r) return 'br';
+      if (pos.x > x && pos.x < x + w && pos.y > y && pos.y < y + h) return 'move';
+      return null;
+    }
+
+    function onDown(e) {
+      if (!cropping) return;
+      const pos = getPos(e);
+      dragMode = hitTest(pos);
+      if (dragMode) { e.preventDefault(); dragStart = { x: pos.x, y: pos.y, box: { ...cropBox } }; }
+    }
+
+    function onMove(e) {
+      if (!dragMode) return;
+      e.preventDefault();
+      const pos = getPos(e);
+      const dx = pos.x - dragStart.x, dy = pos.y - dragStart.y;
+      const b = dragStart.box, minS = 24, maxW = cropOverlay.width, maxH = cropOverlay.height;
+
+      if (dragMode === 'move') {
+        cropBox.x = Math.max(0, Math.min(maxW - b.w, b.x + dx));
+        cropBox.y = Math.max(0, Math.min(maxH - b.h, b.y + dy));
+      } else if (dragMode === 'tl') {
+        const nx = Math.max(0, Math.min(b.x + b.w - minS, b.x + dx));
+        const ny = Math.max(0, Math.min(b.y + b.h - minS, b.y + dy));
+        cropBox = { x: nx, y: ny, w: b.x + b.w - nx, h: b.y + b.h - ny };
+      } else if (dragMode === 'tr') {
+        const nw = Math.max(minS, Math.min(maxW - b.x, b.w + dx));
+        const ny = Math.max(0, Math.min(b.y + b.h - minS, b.y + dy));
+        cropBox = { x: b.x, y: ny, w: nw, h: b.y + b.h - ny };
+      } else if (dragMode === 'bl') {
+        const nx = Math.max(0, Math.min(b.x + b.w - minS, b.x + dx));
+        const nh = Math.max(minS, Math.min(maxH - b.y, b.h + dy));
+        cropBox = { x: nx, y: b.y, w: b.x + b.w - nx, h: nh };
+      } else if (dragMode === 'br') {
+        cropBox.w = Math.max(minS, Math.min(maxW - b.x, b.w + dx));
+        cropBox.h = Math.max(minS, Math.min(maxH - b.y, b.h + dy));
+      }
+      drawCropOverlay();
+    }
+
+    function onUp() { dragMode = null; }
+
+    cropOverlay.addEventListener('mousedown', onDown);
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    cropOverlay.addEventListener('touchstart', onDown, { passive: false });
+    window.addEventListener('touchmove', onMove, { passive: false });
+    window.addEventListener('touchend', onUp);
+
+    function applyCrop() {
+      const scaleX = previewCanvas.width / cropOverlay.width;
+      const scaleY = previewCanvas.height / cropOverlay.height;
+      const sx = Math.round(cropBox.x * scaleX);
+      const sy = Math.round(cropBox.y * scaleY);
+      const sw = Math.max(1, Math.round(cropBox.w * scaleX));
+      const sh = Math.max(1, Math.round(cropBox.h * scaleY));
+
+      const temp = document.createElement('canvas');
+      temp.width = sw; temp.height = sh;
+      temp.getContext('2d').drawImage(previewCanvas, sx, sy, sw, sh, 0, 0, sw, sh);
+
+      const newImg = new Image();
+      newImg.onload = () => {
+        workingImg = newImg;
+        aspect = sw / sh;
+        wInput.value = sw; hInput.value = sh;
+        origInfo.textContent = `Cropped: ${sw} × ${sh} px`;
+        resetBtn.style.display = 'inline-block';
+        toggleCrop();
+        renderPreview();
+      };
+      newImg.src = temp.toDataURL('image/png');
+    }
+
+    function resetImage() {
+      if (!originalImg) return;
+      workingImg = originalImg;
+      aspect = originalImg.width / originalImg.height;
+      wInput.value = originalImg.width; hInput.value = originalImg.height;
+      origInfo.textContent = `Original: ${originalImg.width} × ${originalImg.height} px`;
+      resetBtn.style.display = 'none';
+      if (cropping) toggleCrop();
+      renderPreview();
     }
 
     imgUpload.addEventListener('change', (e) => {
@@ -156,12 +338,14 @@
       reader.onload = (ev) => {
         const img = new Image();
         img.onload = () => {
-          loadedImg = img;
+          originalImg = img; workingImg = img;
           aspect = img.width / img.height;
           wInput.value = img.width; hInput.value = img.height;
           origInfo.textContent = `Original: ${img.width} × ${img.height} px`;
-          previewCanvas.style.display = 'block';
-          dlBtn.disabled = false;
+          canvasWrap.style.display = 'inline-block';
+          cropToggleBtn.disabled = false; dlBtn.disabled = false;
+          resetBtn.style.display = 'none';
+          if (cropping) toggleCrop();
           renderPreview();
         };
         img.src = ev.target.result;
@@ -170,19 +354,19 @@
     });
 
     wInput.oninput = () => {
-      if (lockRatio.checked && loadedImg) hInput.value = Math.max(1, Math.round(wInput.value / aspect));
+      if (lockRatio.checked && workingImg) hInput.value = Math.max(1, Math.round(wInput.value / aspect));
       renderPreview();
     };
     hInput.oninput = () => {
-      if (lockRatio.checked && loadedImg) wInput.value = Math.max(1, Math.round(hInput.value * aspect));
+      if (lockRatio.checked && workingImg) wInput.value = Math.max(1, Math.round(hInput.value * aspect));
       renderPreview();
     };
     pixelCrisp.onchange = renderPreview;
 
     function downloadResized() {
-      if (!loadedImg) return;
+      if (!workingImg) return;
       const link = document.createElement('a');
-      link.download = `resized-${wInput.value}x${hInput.value}.png`;
+      link.download = `edited-${wInput.value}x${hInput.value}.png`;
       link.href = previewCanvas.toDataURL('image/png');
       link.click();
     }
